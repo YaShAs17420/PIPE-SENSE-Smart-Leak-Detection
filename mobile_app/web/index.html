@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+
+  <meta
+    name="description"
+    content="PIPE-SENSE Smart Water Monitoring"
+  >
+
+  <meta
+    name="theme-color"
+    content="#ffffff"
+  >
+
+  <title>PIPE-SENSE</title>
+
+  <link
+    rel="manifest"
+    href="manifest.json"
+  >
+
+  <!--
+    Three.js import map
+    Keep both entries on the SAME Three.js version.
+  -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.185.1/examples/jsm/"
+    }
+  }
+  </script>
+
+  <!--
+    PIPE-SENSE Three.js scene
+  -->
+  <script
+    type="module"
+    src="three/scene.js"
+  ></script>
+
+</head>
+
+<body>
+
+  <script src="flutter_bootstrap.js" async></script>
+
+</body>
+</html>
