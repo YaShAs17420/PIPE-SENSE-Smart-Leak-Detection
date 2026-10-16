@@ -1,3 +1,4 @@
+
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Wire.h>
@@ -5,11 +6,11 @@
 #include <math.h>
 
 // ============================================================
-// WIFI SETTINGS
+// PIPE-SENSE - ESP32 SENSOR SERVER
+// Readable Serial Monitor + Flutter HTTP Integration
 // ============================================================
-// Keep the same Wi-Fi network you are currently using.
-// Replace these two values with your existing local credentials.
 
+// ENTER YOUR CURRENTLY WORKING WI-FI CREDENTIALS
 const char* WIFI_SSID = "WIN-EGIE4UL1P0Q 2013";
 const char* WIFI_PASSWORD = "2532A|x3";
 
@@ -62,65 +63,65 @@ TwoWire I2C_1 = TwoWire(1);
 volatile uint32_t yfPulseCount = 0;
 volatile uint32_t zjPulseCount = 0;
 
-float yfFlowRate = 0.0;
-float zjFlowRate = 0.0;
+float yfFlowRate = 0.0f;
+float zjFlowRate = 0.0f;
+
+uint32_t yfPulsesLastSecond = 0;
+uint32_t zjPulsesLastSecond = 0;
 
 unsigned long lastFlowUpdate = 0;
+
+// Provisional conversion. Calibrate using measured water volume.
+const float YF_PULSES_PER_LPM = 7.5f;
+const float ZJ_PULSES_PER_LPM = 7.5f;
 
 // ============================================================
 // MPU6050 DATA
 // ============================================================
 
-float vibration1 = 0.0;
-float vibration2 = 0.0;
+float vibration1 = 0.0f;
+float vibration2 = 0.0f;
 
-float ax1 = 0.0;
-float ay1 = 0.0;
-float az1 = 0.0;
+float ax1 = 0.0f;
+float ay1 = 0.0f;
+float az1 = 0.0f;
 
-float ax2 = 0.0;
-float ay2 = 0.0;
-float az2 = 0.0;
+float ax2 = 0.0f;
+float ay2 = 0.0f;
+float az2 = 0.0f;
 
-// ============================================================
-// GRAVITY BASELINE
-// ============================================================
+// Gravity estimates
+float gravityX1 = 0.0f;
+float gravityY1 = 0.0f;
+float gravityZ1 = 0.0f;
 
-float gravityX1 = 0.0;
-float gravityY1 = 0.0;
-float gravityZ1 = 0.0;
-
-float gravityX2 = 0.0;
-float gravityY2 = 0.0;
-float gravityZ2 = 0.0;
+float gravityX2 = 0.0f;
+float gravityY2 = 0.0f;
+float gravityZ2 = 0.0f;
 
 bool gravityInitialized1 = false;
 bool gravityInitialized2 = false;
 
-// Slowly follows the gravity component while preserving
-// short-duration vibration.
-const float GRAVITY_FILTER_ALPHA = 0.05;
+const float GRAVITY_FILTER_ALPHA = 0.05f;
 
-// ============================================================
-// VIBRATION PEAK WINDOW
-// ============================================================
-//
-// The MPU is sampled continuously.
-// During each 1-second window, the highest dynamic
-// acceleration is stored.
-//
-// This prevents a short vibration event from being missed
-// simply because Flutter happened to request /data at another
-// instant.
-//
-
-float vibrationPeak1 = 0.0;
-float vibrationPeak2 = 0.0;
+// Peak vibration measured during each one-second window
+float vibrationPeak1 = 0.0f;
+float vibrationPeak2 = 0.0f;
 
 unsigned long lastVibrationWindow = 0;
 
 // ============================================================
-// INTERRUPT FUNCTIONS
+// SERIAL MONITOR SETTINGS
+// ============================================================
+
+// One readable report every five seconds.
+// Sensor sampling and HTTP responses remain active in between.
+const unsigned long SERIAL_REPORT_INTERVAL = 5000;
+
+unsigned long lastSerialReport = 0;
+
+// ============================================================
+// INTERRUPTS
 // ============================================================
 
 void IRAM_ATTR countYFPulse() {
@@ -132,7 +133,7 @@ void IRAM_ATTR countZJPulse() {
 }
 
 // ============================================================
-// MPU REGISTER WRITE
+// MPU6050 REGISTER WRITE
 // ============================================================
 
 bool writeMPURegister(
@@ -156,14 +157,13 @@ bool initializeMPU(
   TwoWire &bus,
   uint8_t address
 ) {
-  // Wake the MPU6050.
   if (!writeMPURegister(bus, address, 0x6B, 0x00)) {
     return false;
   }
 
   delay(100);
 
-  // Accelerometer range = +/-2g.
+  // Accelerometer range: +/- 2g
   if (!writeMPURegister(bus, address, 0x1C, 0x00)) {
     return false;
   }
@@ -210,10 +210,10 @@ bool readAccel(
   int16_t rawAz =
       (int16_t)((bus.read() << 8) | bus.read());
 
-  // +/-2g = 16384 LSB/g.
-  ax = rawAx / 16384.0;
-  ay = rawAy / 16384.0;
-  az = rawAz / 16384.0;
+  // +/- 2g = 16384 LSB/g
+  ax = rawAx / 16384.0f;
+  ay = rawAy / 16384.0f;
+  az = rawAz / 16384.0f;
 
   return true;
 }
@@ -231,39 +231,30 @@ float calculateDynamicVibration(
   float &gravityZ,
   bool &initialized
 ) {
-  // First valid reading establishes the initial gravity baseline.
   if (!initialized) {
     gravityX = ax;
     gravityY = ay;
     gravityZ = az;
+
     initialized = true;
 
-    return 0.0;
+    return 0.0f;
   }
 
-  // Slowly track the gravity component.
-  gravityX =
-      gravityX +
-      GRAVITY_FILTER_ALPHA * (ax - gravityX);
-
-  gravityY =
-      gravityY +
-      GRAVITY_FILTER_ALPHA * (ay - gravityY);
-
-  gravityZ =
-      gravityZ +
-      GRAVITY_FILTER_ALPHA * (az - gravityZ);
+  // Slowly estimate the gravity component.
+  gravityX += GRAVITY_FILTER_ALPHA * (ax - gravityX);
+  gravityY += GRAVITY_FILTER_ALPHA * (ay - gravityY);
+  gravityZ += GRAVITY_FILTER_ALPHA * (az - gravityZ);
 
   // Remove estimated gravity.
   float dynamicX = ax - gravityX;
   float dynamicY = ay - gravityY;
   float dynamicZ = az - gravityZ;
 
-  // Dynamic acceleration magnitude.
-  return sqrt(
-    (dynamicX * dynamicX) +
-    (dynamicY * dynamicY) +
-    (dynamicZ * dynamicZ)
+  return sqrtf(
+    dynamicX * dynamicX +
+    dynamicY * dynamicY +
+    dynamicZ * dynamicZ
   );
 }
 
@@ -272,7 +263,6 @@ float calculateDynamicVibration(
 // ============================================================
 
 void updateFlowData() {
-
   if (millis() - lastFlowUpdate < 1000) {
     return;
   }
@@ -289,27 +279,15 @@ void updateFlowData() {
 
   interrupts();
 
-  // Provisional conversion.
-  // This will be calibrated using the physical prototype.
-  yfFlowRate = yfPulses / 7.5;
-  zjFlowRate = zjPulses / 7.5;
+  yfPulsesLastSecond = yfPulses;
+  zjPulsesLastSecond = zjPulses;
 
-  Serial.println();
-  Serial.println("========== FLOW DATA ==========");
+  // Provisional conversion; physical calibration is still required.
+  yfFlowRate = yfPulses / YF_PULSES_PER_LPM;
+  zjFlowRate = zjPulses / ZJ_PULSES_PER_LPM;
 
-  Serial.print("YF Pulses: ");
-  Serial.println(yfPulses);
-
-  Serial.print("YF Flow Rate: ");
-  Serial.print(yfFlowRate, 2);
-  Serial.println(" L/min");
-
-  Serial.print("ZJ Pulses: ");
-  Serial.println(zjPulses);
-
-  Serial.print("ZJ Flow Rate: ");
-  Serial.print(zjFlowRate, 2);
-  Serial.println(" L/min");
+  // Intentionally no Serial printing here.
+  // The consolidated report is printed every five seconds.
 }
 
 // ============================================================
@@ -317,9 +295,7 @@ void updateFlowData() {
 // ============================================================
 
 void updateMPUData() {
-
-  // ---------------- MPU1 ----------------
-
+  // MPU 1
   bool mpu1OK = readAccel(
     I2C_0,
     MPU1_ADDR,
@@ -329,25 +305,22 @@ void updateMPUData() {
   );
 
   if (mpu1OK) {
-
-    float currentVibration1 =
-        calculateDynamicVibration(
-          ax1,
-          ay1,
-          az1,
-          gravityX1,
-          gravityY1,
-          gravityZ1,
-          gravityInitialized1
-        );
+    float currentVibration1 = calculateDynamicVibration(
+      ax1,
+      ay1,
+      az1,
+      gravityX1,
+      gravityY1,
+      gravityZ1,
+      gravityInitialized1
+    );
 
     if (currentVibration1 > vibrationPeak1) {
       vibrationPeak1 = currentVibration1;
     }
   }
 
-  // ---------------- MPU2 ----------------
-
+  // MPU 2
   bool mpu2OK = readAccel(
     I2C_1,
     MPU2_ADDR,
@@ -357,34 +330,30 @@ void updateMPUData() {
   );
 
   if (mpu2OK) {
-
-    float currentVibration2 =
-        calculateDynamicVibration(
-          ax2,
-          ay2,
-          az2,
-          gravityX2,
-          gravityY2,
-          gravityZ2,
-          gravityInitialized2
-        );
+    float currentVibration2 = calculateDynamicVibration(
+      ax2,
+      ay2,
+      az2,
+      gravityX2,
+      gravityY2,
+      gravityZ2,
+      gravityInitialized2
+    );
 
     if (currentVibration2 > vibrationPeak2) {
       vibrationPeak2 = currentVibration2;
     }
   }
 
-  // ---------------- 1-SECOND PEAK WINDOW ----------------
-
+  // Update the vibration readings every second.
   if (millis() - lastVibrationWindow >= 1000) {
-
     lastVibrationWindow = millis();
 
     vibration1 = vibrationPeak1;
     vibration2 = vibrationPeak2;
 
-    vibrationPeak1 = 0.0;
-    vibrationPeak2 = 0.0;
+    vibrationPeak1 = 0.0f;
+    vibrationPeak2 = 0.0f;
   }
 }
 
@@ -402,58 +371,48 @@ void updateSensorData() {
 // ============================================================
 
 void updateLCD() {
-
-  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("                ");
 
   lcd.setCursor(0, 0);
   lcd.print("YF:");
   lcd.print(yfFlowRate, 1);
-
   lcd.print(" ZJ:");
   lcd.print(zjFlowRate, 1);
 
   lcd.setCursor(0, 1);
+  lcd.print("                ");
+
+  lcd.setCursor(0, 1);
   lcd.print("V1:");
   lcd.print(vibration1, 2);
-
   lcd.print(" V2:");
   lcd.print(vibration2, 2);
 }
 
 // ============================================================
-// CREATE JSON
+// CREATE JSON FOR FLUTTER
 // ============================================================
 
 String createJSON() {
-
   String json = "{";
 
   json += "\"yfFlowRate\":";
   json += String(yfFlowRate, 2);
 
-  json += ",";
-
-  json += "\"zjFlowRate\":";
+  json += ",\"zjFlowRate\":";
   json += String(zjFlowRate, 2);
 
-  json += ",";
+  json += ",\"yfPulses\":";
+  json += String(yfPulsesLastSecond);
 
-  json += "\"yfPulses\":";
-  json += String(yfPulseCount);
+  json += ",\"zjPulses\":";
+  json += String(zjPulsesLastSecond);
 
-  json += ",";
-
-  json += "\"zjPulses\":";
-  json += String(zjPulseCount);
-
-  json += ",";
-
-  json += "\"vibration1\":";
+  json += ",\"vibration1\":";
   json += String(vibration1, 2);
 
-  json += ",";
-
-  json += "\"vibration2\":";
+  json += ",\"vibration2\":";
   json += String(vibration2, 2);
 
   json += "}";
@@ -462,58 +421,35 @@ String createJSON() {
 }
 
 // ============================================================
-// ROOT PAGE
+// ROOT WEB PAGE
 // ============================================================
 
 void handleRoot() {
-
-  String page = "<!DOCTYPE html>";
-  page += "<html>";
-  page += "<head>";
+  String page = "<!DOCTYPE html><html><head>";
   page += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
-  page += "<title>PIPE-SENSE ESP32</title>";
-  page += "</head>";
-
-  page += "<body>";
-
+  page += "<title>PIPE-SENSE ESP32</title></head><body>";
   page += "<h1>PIPE-SENSE</h1>";
   page += "<h2>ESP32 Sensor Server</h2>";
-
   page += "<p>ESP32 is connected successfully.</p>";
   page += "<p>Open <b>/data</b> to view sensor data.</p>";
+  page += "</body></html>";
 
-  page += "</body>";
-  page += "</html>";
-
-  server.send(
-    200,
-    "text/html",
-    page
-  );
+  server.send(200, "text/html", page);
 }
 
 // ============================================================
-// DATA ENDPOINT
+// SENSOR DATA ENDPOINT
 // ============================================================
 
 void handleData() {
-
-  server.sendHeader(
-    "Access-Control-Allow-Origin",
-    "*"
-  );
-
-  server.sendHeader(
-    "Cache-Control",
-    "no-cache"
-  );
-
-  String json = createJSON();
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+  server.sendHeader("Pragma", "no-cache");
 
   server.send(
     200,
     "application/json",
-    json
+    createJSON()
   );
 }
 
@@ -522,11 +458,7 @@ void handleData() {
 // ============================================================
 
 void handleNotFound() {
-
-  server.sendHeader(
-    "Access-Control-Allow-Origin",
-    "*"
-  );
+  server.sendHeader("Access-Control-Allow-Origin", "*");
 
   server.send(
     404,
@@ -536,11 +468,10 @@ void handleNotFound() {
 }
 
 // ============================================================
-// STARTUP BEEP
+// BUZZER STARTUP BEEP
 // ============================================================
 
 void startupBeep() {
-
   digitalWrite(BUZZER, HIGH);
   delay(150);
 
@@ -554,42 +485,132 @@ void startupBeep() {
 }
 
 // ============================================================
+// WI-FI CONNECTION
+// ============================================================
+
+void connectWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  Serial.println();
+  Serial.println("Connecting to Wi-Fi...");
+
+  int attempts = 0;
+
+  while (WiFi.status() != WL_CONNECTED && attempts < 60) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("Wi-Fi connected!");
+    Serial.print("ESP32 IP address: ");
+    Serial.println(WiFi.localIP());
+
+    Serial.print("Wi-Fi signal: ");
+    Serial.print(WiFi.RSSI());
+    Serial.println(" dBm");
+  } else {
+    Serial.println("Wi-Fi connection failed.");
+  }
+}
+
+// ============================================================
+// START HTTP SERVER
+// ============================================================
+
+void startHttpServer() {
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/data", HTTP_GET, handleData);
+  server.onNotFound(handleNotFound);
+
+  server.begin();
+
+  Serial.println("HTTP server started.");
+  Serial.print("Dashboard data URL: http://");
+  Serial.print(WiFi.localIP());
+  Serial.println("/data");
+}
+
+// ============================================================
+// PRINT ONE READABLE SENSOR REPORT
+// ============================================================
+
+void printSensorReport() {
+  Serial.println();
+  Serial.println("========================================");
+  Serial.println("          PIPE-SENSE LIVE DATA");
+  Serial.println("========================================");
+
+  Serial.print("Wi-Fi status : ");
+  Serial.println(
+    WiFi.status() == WL_CONNECTED
+      ? "CONNECTED"
+      : "DISCONNECTED"
+  );
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("ESP32 IP     : ");
+    Serial.println(WiFi.localIP());
+
+    Serial.print("Wi-Fi signal : ");
+    Serial.print(WiFi.RSSI());
+    Serial.println(" dBm");
+  }
+
+  Serial.println("----------------------------------------");
+
+  Serial.print("YF-S201 flow : ");
+  Serial.print(yfFlowRate, 2);
+  Serial.println(" L/min");
+
+  Serial.print("ZJ-S201 flow : ");
+  Serial.print(zjFlowRate, 2);
+  Serial.println(" L/min");
+
+  Serial.print("YF pulses    : ");
+  Serial.println(yfPulsesLastSecond);
+
+  Serial.print("ZJ pulses    : ");
+  Serial.println(zjPulsesLastSecond);
+
+  Serial.println("----------------------------------------");
+
+  Serial.print("MPU6050 #1   : ");
+  Serial.println(vibration1, 3);
+
+  Serial.print("MPU6050 #2   : ");
+  Serial.println(vibration2, 3);
+
+  Serial.println("========================================");
+}
+
+// ============================================================
 // SETUP
 // ============================================================
 
 void setup() {
-
   Serial.begin(115200);
-
   delay(1000);
 
   Serial.println();
   Serial.println("========================================");
-  Serial.println("       PIPE-SENSE ESP32 INTEGRATION");
+  Serial.println("       PIPE-SENSE ESP32 SERVER");
   Serial.println("========================================");
 
-  // ----------------------------------------------------------
-  // BUZZER
-  // ----------------------------------------------------------
-
+  // Buzzer
   pinMode(BUZZER, OUTPUT);
   digitalWrite(BUZZER, LOW);
-
   startupBeep();
 
-  // ----------------------------------------------------------
-  // FLOW SENSORS
-  // ----------------------------------------------------------
-
-  pinMode(
-    YF_FLOW_SENSOR,
-    INPUT
-  );
-
-  pinMode(
-    ZJ_FLOW_SENSOR,
-    INPUT_PULLUP
-  );
+  // Flow sensors
+  pinMode(YF_FLOW_SENSOR, INPUT);
+  pinMode(ZJ_FLOW_SENSOR, INPUT_PULLUP);
 
   attachInterrupt(
     digitalPinToInterrupt(YF_FLOW_SENSOR),
@@ -603,225 +624,95 @@ void setup() {
     FALLING
   );
 
-  // ----------------------------------------------------------
   // LCD
-  // ----------------------------------------------------------
-
   lcd.begin(16, 2);
-
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("PIPE-SENSE");
-
   lcd.setCursor(0, 1);
   lcd.print("Starting...");
 
-  delay(1000);
-
-  // ----------------------------------------------------------
-  // MPU1
-  // ----------------------------------------------------------
-
-  I2C_0.begin(
-    MPU1_SDA,
-    MPU1_SCL
-  );
+  // Initialize independent I2C buses.
+  I2C_0.begin(MPU1_SDA, MPU1_SCL);
+  I2C_1.begin(MPU2_SDA, MPU2_SCL);
 
   I2C_0.setClock(400000);
-
-  // ----------------------------------------------------------
-  // MPU2
-  // ----------------------------------------------------------
-
-  I2C_1.begin(
-    MPU2_SDA,
-    MPU2_SCL
-  );
-
   I2C_1.setClock(400000);
 
-  bool mpu1Initialized =
-      initializeMPU(
-        I2C_0,
-        MPU1_ADDR
-      );
+  bool mpu1Initialized = initializeMPU(I2C_0, MPU1_ADDR);
+  bool mpu2Initialized = initializeMPU(I2C_1, MPU2_ADDR);
 
-  bool mpu2Initialized =
-      initializeMPU(
-        I2C_1,
-        MPU2_ADDR
-      );
+  Serial.print("MPU6050 #1: ");
+  Serial.println(mpu1Initialized ? "OK" : "FAILED");
 
-  Serial.println();
+  Serial.print("MPU6050 #2: ");
+  Serial.println(mpu2Initialized ? "OK" : "FAILED");
 
-  Serial.print("MPU1 initialization: ");
-
-  if (mpu1Initialized) {
-    Serial.println("OK");
-  } else {
-    Serial.println("FAILED");
+  if (!mpu1Initialized || !mpu2Initialized) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("MPU ERROR");
+    lcd.setCursor(0, 1);
+    lcd.print("Check sensor");
+    delay(1500);
   }
 
-  Serial.print("MPU2 initialization: ");
-
-  if (mpu2Initialized) {
-    Serial.println("OK");
-  } else {
-    Serial.println("FAILED");
-  }
-
-  // ----------------------------------------------------------
-  // WIFI
-  // ----------------------------------------------------------
-
+  // Keep both sensors still during initial gravity calibration.
   Serial.println();
-  Serial.println("Connecting to WiFi...");
+  Serial.println("Initializing vibration baseline...");
+  Serial.println("Keep both MPU6050 sensors still.");
 
-  WiFi.mode(WIFI_STA);
-
-  WiFi.begin(
-    WIFI_SSID,
-    WIFI_PASSWORD
-  );
-
-  int wifiAttempts = 0;
-
-  while (
-    WiFi.status() != WL_CONNECTED &&
-    wifiAttempts < 30
-  ) {
-
-    delay(500);
-
-    Serial.print(".");
-
-    wifiAttempts++;
-  }
-
-  Serial.println();
+  // Wi-Fi
+  connectWiFi();
 
   if (WiFi.status() == WL_CONNECTED) {
-
-    Serial.println("WiFi connected!");
-
-    Serial.print("ESP32 IP Address: ");
-    Serial.println(WiFi.localIP());
-
-    // --------------------------------------------------------
-    // HTTP SERVER
-    // --------------------------------------------------------
-
-    server.on(
-      "/",
-      HTTP_GET,
-      handleRoot
-    );
-
-    server.on(
-      "/data",
-      HTTP_GET,
-      handleData
-    );
-
-    server.onNotFound(
-      handleNotFound
-    );
-
-    server.begin();
-
-    Serial.println("HTTP server started.");
-
-    Serial.println();
-    Serial.println("========================================");
-    Serial.println("PIPE-SENSE READY");
-    Serial.println("========================================");
-
-    Serial.print("Open in browser: http://");
-    Serial.println(WiFi.localIP());
-
-    Serial.print("Sensor data: http://");
-    Serial.print(WiFi.localIP());
-    Serial.println("/data");
-
+    startHttpServer();
   } else {
-
-    Serial.println("WiFi connection FAILED.");
-
     lcd.clear();
-
     lcd.setCursor(0, 0);
-    lcd.print("WiFi Failed");
-
+    lcd.print("Wi-Fi failed");
     lcd.setCursor(0, 1);
-    lcd.print("Check SSID");
+    lcd.print("Check settings");
   }
 
-  // Start the first vibration window.
+  lastFlowUpdate = millis();
   lastVibrationWindow = millis();
+  lastSerialReport = millis();
+
+  lcd.clear();
+
+  Serial.println();
+  Serial.println("PIPE-SENSE INITIALIZATION COMPLETE.");
+  Serial.println("Sensor report interval: 5 seconds.");
 }
 
 // ============================================================
-// LOOP
+// MAIN LOOP
 // ============================================================
 
 void loop() {
-
+  // Continue sampling sensors frequently.
   updateSensorData();
 
-  // ----------------------------------------------------------
-  // LCD
-  // ----------------------------------------------------------
-
+  // Refresh LCD once per second.
   static unsigned long lastLCDUpdate = 0;
 
   if (millis() - lastLCDUpdate >= 1000) {
-
     lastLCDUpdate = millis();
-
     updateLCD();
   }
 
-  // ----------------------------------------------------------
-  // HTTP SERVER
-  // ----------------------------------------------------------
-
+  // Keep servicing Flutter/browser requests.
   if (WiFi.status() == WL_CONNECTED) {
     server.handleClient();
   }
 
-  // ----------------------------------------------------------
-  // SERIAL MONITOR
-  // ----------------------------------------------------------
-
-  static unsigned long lastSerialDisplay = 0;
-
-  if (millis() - lastSerialDisplay >= 1000) {
-
-    lastSerialDisplay = millis();
-
-    Serial.println();
-    Serial.println("========== VIBRATION DATA ==========");
-
-    Serial.print("MPU1 Peak Vibration: ");
-    Serial.println(vibration1, 3);
-
-    Serial.print("MPU2 Peak Vibration: ");
-    Serial.println(vibration2, 3);
-
-    Serial.print("Gravity Baseline 1: ");
-    Serial.print(gravityX1, 2);
-    Serial.print(", ");
-    Serial.print(gravityY1, 2);
-    Serial.print(", ");
-    Serial.println(gravityZ1, 2);
-
-    Serial.print("Gravity Baseline 2: ");
-    Serial.print(gravityX2, 2);
-    Serial.print(", ");
-    Serial.print(gravityY2, 2);
-    Serial.print(", ");
-    Serial.println(gravityZ2, 2);
+  // Print only one consolidated report every five seconds.
+  if (millis() - lastSerialReport >= SERIAL_REPORT_INTERVAL) {
+    lastSerialReport = millis();
+    printSensorReport();
   }
 
-  delay(5);
+  // Small yield; do not add a long delay here.
+  delay(2);
 }
